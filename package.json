@@ -1,0 +1,19 @@
+{
+  "name": "cartello-bot",
+  "version": "1.0.0",
+  "description": "Bot Discord + API per il mercato nero di Shadow RP",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.15.3",
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
