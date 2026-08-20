@@ -205,6 +205,22 @@ app.patch('/api/orders/:id', requireAdminKey, async (req, res) => {
   res.json(order);
 });
 
+
+app.delete('/api/orders/:id', requireAdminKey, async (req, res) => {
+  const order = db.orders.find(o => o.id === req.params.id);
+  if (!order) return res.status(404).json({ error: 'ordine non trovato' });
+  try {
+    if (order.discordChannelId && order.discordMessageId) {
+      const channel = await client.channels.fetch(order.discordChannelId);
+      const msg = await channel.messages.fetch(order.discordMessageId);
+      await msg.delete();
+    }
+  } catch (e) { console.error('errore eliminazione messaggio Discord', e); }
+  db.orders = db.orders.filter(o => o.id !== req.params.id);
+  saveData(db);
+  res.json({ ok: true });
+});
+
 // ---------- ruoli dei membri (in base ai ruoli veri del server Discord) ----------
 app.get('/api/members', requireAdminKey, async (req, res) => {
   if (!GUILD_ID) return res.status(400).json({ error: 'DISCORD_GUILD_ID non configurato sul server del bot' });
