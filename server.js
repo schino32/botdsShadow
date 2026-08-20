@@ -34,7 +34,9 @@ const ALLOWED_ROLES = new Set([
   'consigliere_cartello',
   'boss',
   'vice',
-  'consigliere'
+  'consigliere',
+  'braccio_destro',
+  'braccio_sinistro'
 ]);
 
 function normalizeRole(role) {
@@ -112,20 +114,7 @@ function buildOrderButtons(order, disabled) {
 async function postOrderToDiscord(order) {
   const channel = await client.channels.fetch(CHANNEL_ID);
   if (!channel) return;
-
-  const payload = {
-    embeds: [buildOrderEmbed(order)],
-    components: buildOrderButtons(order)
-  };
-
-  // Tag del ruolo (se configurato)
-  if (PING_ROLE_ID) {
-    payload.content = `<@&${PING_ROLE_ID}> Nuovo ordine dal black market`;
-    // opzionale: evita di pingare @everyone per sbaglio
-    payload.allowedMentions = { roles: [PING_ROLE_ID] };
-  }
-
-  const msg = await channel.send(payload);
+  const msg = await channel.send({ embeds: [buildOrderEmbed(order)], components: buildOrderButtons(order) });
   order.discordChannelId = channel.id;
   order.discordMessageId = msg.id;
   saveData(db);
@@ -247,7 +236,6 @@ app.patch('/api/orders/:id', requireAdminKey, async (req, res) => {
   if (!['in_attesa', 'approvato', 'consegnato', 'rifiutato'].includes(status)) {
     return res.status(400).json({ error: 'stato non valido' });
   }
-  const PING_ROLE_ID = process.env.DISCORD_PING_ROLE_ID || '1498660458788552754';
   order.status = status;
   saveData(db);
   try {
