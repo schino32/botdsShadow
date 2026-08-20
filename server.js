@@ -14,10 +14,14 @@ const PORT = process.env.PORT || 3000;
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
 const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 const BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const GUILD_ID = process.env.DISCORD_GUILD_ID;
 
 if (!BOT_TOKEN || !CHANNEL_ID) {
   console.error('Manca DISCORD_BOT_TOKEN o DISCORD_CHANNEL_ID nel file .env');
   process.exit(1);
+}
+if (!GUILD_ID) {
+  console.warn('DISCORD_GUILD_ID non impostato: la sezione "Ruoli" del sito non funzionera finche non lo aggiungi al .env');
 }
 
 // ---------- storage su file (semplice, va bene per un server RP) ----------
@@ -46,7 +50,9 @@ function requireAdminKey(req, res, next) {
 }
 
 // ---------- Discord bot ----------
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+// GuildMembers e' un "privileged intent": va attivato anche nel Developer Portal
+// (Bot -> Privileged Gateway Intents -> Server Members Intent) o le liste risulteranno vuote.
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
 
 function statusMeta(status) {
   return {
@@ -199,5 +205,33 @@ app.patch('/api/orders/:id', requireAdminKey, async (req, res) => {
   res.json(order);
 });
 
+// ---------- ruoli dei membri (in base ai ruoli veri del server Discord) ----------
+app.get('/api/members', requireAdminKey, async (req, res) => {
+  if (!GUILD_ID) return res.status(400).json({ error: 'DISCORD_GUILD_ID non configurato sul server del bot' });
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const members = await guild.members.fetch(); // richiede l'intent GuildMembers attivo
+    const list = members
+      .filter(m => !m.user.bot)
+      .map(m => {
+        const roles = m.roles.cache
+          .filter(r => r.name !== '@everyone')
+          .sort((a, b) => b.position - a.position)
+          .map(r => ({ name: r.name, color: r.hexColor, position: r.position }));
+        return {
+          id: m.user.id,
+          username: m.user.username,
+          displayName: m.displayName,
+          topRole: roles[0] || null,
+          roles
+        };
+      })
+      .sort((a, b) => (b.topRole ? b.topRole.position : -1) - (a.topRole ? a.topRole.position : -1));
+    res.json(list);
+  } catch (e) {
+    console.error('errore lettura membri', e);
+    res.status(500).json({ error: 'impossibile leggere i membri (controlla DISCORD_GUILD_ID e il permesso "Server Members Intent")' });
+  }
+});
+
 app.listen(PORT, () => console.log(`API in ascolto sulla porta ${PORT}`));
-// -- aggiunta senzione ruoli--
