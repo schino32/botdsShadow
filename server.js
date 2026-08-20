@@ -24,6 +24,24 @@ if (!GUILD_ID) {
   console.warn('DISCORD_GUILD_ID non impostato: la sezione "Ruoli" del sito non funzionera finche non lo aggiungi al .env');
 }
 
+// ---------- Ruoli account (login sito) ----------
+// Solo "admin" apre il pannello staff. Gli altri gradi vedono solo il catalogo.
+const ALLOWED_ROLES = new Set([
+  'admin',
+  'user',
+  'boss_cartello',
+  'vice_boss_cartello',
+  'consigliere_cartello',
+  'boss',
+  'vice',
+  'consigliere'
+]);
+
+function normalizeRole(role) {
+  const r = String(role || 'user').toLowerCase().trim();
+  return ALLOWED_ROLES.has(r) ? r : 'user';
+}
+
 // ---------- storage su file (semplice, va bene per un server RP) ----------
 function loadData() {
   if (!fs.existsSync(DATA_FILE)) {
@@ -144,20 +162,43 @@ app.get('/api/users', (req, res) => {
   res.json(db.users.map(u => ({ username: u.username, role: u.role })));
 });
 
+// Crea utente — ora accetta tutti i ruoli Cartello
 app.post('/api/users', requireAdminKey, (req, res) => {
   const { username, password, role } = req.body || {};
   if (!username || !password) return res.status(400).json({ error: 'username e password richiesti' });
-  if (db.users.find(u => u.username.toLowerCase() === username.toLowerCase())) {
+  if (String(password).length < 3) return res.status(400).json({ error: 'password troppo corta' });
+  if (db.users.find(u => u.username.toLowerCase() === String(username).toLowerCase())) {
     return res.status(409).json({ error: 'username già esistente' });
   }
-  const user = { username, password, role: role === 'admin' ? 'admin' : 'user' };
+  const user = { username: String(username).trim(), password: String(password), role: normalizeRole(role) };
   db.users.push(user);
   saveData(db);
   res.json({ username: user.username, role: user.role });
 });
 
+// PATCH — cambia ruolo (e opzionalmente password) senza cancellare l'account
+app.patch('/api/users/:username', requireAdminKey, (req, res) => {
+  const username = decodeURIComponent(req.params.username || '').trim();
+  if (!username) return res.status(400).json({ error: 'username mancante' });
+
+  const user = db.users.find(u => u.username.toLowerCase() === username.toLowerCase());
+  if (!user) return res.status(404).json({ error: 'utente non trovato' });
+
+  if (req.body && req.body.role !== undefined) {
+    user.role = normalizeRole(req.body.role);
+  }
+  if (req.body && req.body.password !== undefined && String(req.body.password).length >= 3) {
+    user.password = String(req.body.password);
+  }
+
+  saveData(db);
+  res.json({ username: user.username, role: user.role });
+});
+
 app.delete('/api/users/:username', requireAdminKey, (req, res) => {
+  const before = db.users.length;
   db.users = db.users.filter(u => u.username.toLowerCase() !== req.params.username.toLowerCase());
+  if (db.users.length === before) return res.status(404).json({ error: 'utente non trovato' });
   saveData(db);
   res.json({ ok: true });
 });
@@ -205,7 +246,6 @@ app.patch('/api/orders/:id', requireAdminKey, async (req, res) => {
   res.json(order);
 });
 
-
 app.delete('/api/orders/:id', requireAdminKey, async (req, res) => {
   const order = db.orders.find(o => o.id === req.params.id);
   if (!order) return res.status(404).json({ error: 'ordine non trovato' });
@@ -247,6 +287,97 @@ app.get('/api/members', requireAdminKey, async (req, res) => {
   } catch (e) {
     console.error('errore lettura membri', e);
     res.status(500).json({ error: 'impossibile leggere i membri (controlla DISCORD_GUILD_ID e il permesso "Server Members Intent")' });
+  }
+});
+
+// ---------- Cambia grado Cartello su Discord ----------
+// Il frontend chiama: PATCH /api/members/:id/roles
+// Body: { faction: 'cartello', rank: 'boss'|'vice'|'consigliere'|'membro', rankLabel: '...' }
+const CARTELLO_ROLE_NAMES = {
+  boss: 'Boss Cartello',
+  vice: 'Vice Boss Cartello',
+  consigliere: 'Consigliere Cartello',
+  membro: 'Membro Cartello'
+};
+
+function isCartelloRankRole(name) {
+  const n = String(name || '').toLowerCase();
+  if (n.indexOf('cartello') === -1) return false;
+  return (
+    n.indexOf('boss') !== -1 ||
+    n.indexOf('vice') !== -1 ||
+    n.indexOf('consigliere') !== -1 ||
+    n.indexOf('membro') !== -1
+  );
+}
+
+function matchCartelloRank(roleName, rank) {
+  const n = String(roleName || '').toLowerCase();
+  if (n.indexOf('cartello') === -1) return false;
+  if (rank === 'boss') return n.indexOf('boss') !== -1 && n.indexOf('vice') === -1;
+  if (rank === 'vice') return n.indexOf('vice') !== -1;
+  if (rank === 'consigliere') return n.indexOf('consigliere') !== -1;
+  if (rank === 'membro') return n.indexOf('membro') !== -1;
+  return false;
+}
+
+app.patch('/api/members/:id/roles', requireAdminKey, async (req, res) => {
+  if (!GUILD_ID) return res.status(400).json({ error: 'DISCORD_GUILD_ID non configurato' });
+  if (!client.isReady()) return res.status(503).json({ error: 'bot Discord non ancora pronto' });
+
+  try {
+    const memberId = String(req.params.id || '').trim();
+    const rank = String((req.body && req.body.rank) || '').toLowerCase().trim();
+
+    if (!memberId) return res.status(400).json({ error: 'id membro mancante' });
+    if (!CARTELLO_ROLE_NAMES[rank]) {
+      return res.status(400).json({ error: 'rank non valido (usa: boss, vice, consigliere, membro)' });
+    }
+
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const member = await guild.members.fetch(memberId).catch(() => null);
+    if (!member) return res.status(404).json({ error: 'membro non trovato su Discord' });
+
+    const allRoles = await guild.roles.fetch();
+
+    // Ruolo target (match flessibile sul nome, es. "🦂│Boss Cartello")
+    const targetRole = allRoles.find(r => matchCartelloRank(r.name, rank));
+    if (!targetRole) {
+      return res.status(404).json({
+        error: 'ruolo Discord non trovato: ' + CARTELLO_ROLE_NAMES[rank] +
+          ' — controlla che esista sul server con "Cartello" nel nome'
+      });
+    }
+
+    // Il ruolo del bot deve essere sopra il ruolo da assegnare
+    const botMember = await guild.members.fetchMe();
+    if (targetRole.position >= botMember.roles.highest.position) {
+      return res.status(403).json({
+        error: 'il ruolo del bot e troppo basso per gestire "' + targetRole.name +
+          '". Sposta il ruolo del bot sopra i ruoli Cartello.'
+      });
+    }
+
+    // Rimuovi tutti i gradi Cartello, poi aggiungi quello nuovo
+    const toRemove = member.roles.cache.filter(
+      r => isCartelloRankRole(r.name) && r.id !== targetRole.id
+    );
+    if (toRemove.size > 0) {
+      await member.roles.remove(toRemove, 'Cambio grado da pannello Cartello');
+    }
+    if (!member.roles.cache.has(targetRole.id)) {
+      await member.roles.add(targetRole, 'Cambio grado da pannello Cartello');
+    }
+
+    return res.json({
+      ok: true,
+      memberId,
+      rank,
+      roleName: targetRole.name
+    });
+  } catch (e) {
+    console.error('PATCH /api/members/:id/roles', e);
+    return res.status(500).json({ error: e.message || 'errore Discord' });
   }
 });
 
